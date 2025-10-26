@@ -1,0 +1,10 @@
+# Environment variables (contains API keys)
+.env
+
+# Python specific files
+__pycache__/
+*.pyc
+venv/
+.pytest_cache/
+.mypy_cache/
+.DS_Store
