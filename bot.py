@@ -18,6 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
+# Note: .env files are only used locally. On Render, environment variables are set in the dashboard.
 load_dotenv()
 TELEGRAM_BOT_API_KEY = os.getenv("TELEGRAM_BOT_API_KEY")
 URL_SHORTENER_API_KEY = os.getenv("URL_SHORTENER_API_KEY")
@@ -32,7 +33,6 @@ if not TELEGRAM_BOT_API_KEY or not URL_SHORTENER_API_KEY or not WEBHOOK_URL:
 async def post_init(application: Application) -> None:
     """
     Sets the webhook once the Application object is initialized.
-    This runs after the Application is built but before the webserver starts listening.
     """
     if WEBHOOK_URL and TELEGRAM_BOT_API_KEY:
         try:
@@ -60,6 +60,11 @@ async def shorten_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         return
 
+    # Check if API key is available before making API call
+    if not URL_SHORTENER_API_KEY:
+        await update.message.reply_text("Error: URL Shortener API Key is missing. Cannot shorten links.")
+        return
+
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
     new_text = find_and_shorten_urls(original_text, URL_SHORTENER_API_KEY)
@@ -69,20 +74,21 @@ async def shorten_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(new_text)
 
-# --- WEBHOOK ENTRY POINT FOR GUNICORN ---
-def run_bot():
+# --- WSGI FACTORY FUNCTION ---
+def _initialize_bot_wsgi():
     """
-    Initializes and runs the bot in Webhook mode, wrapping it with a homepage handler.
-    This function is called by Gunicorn to start the web service.
+    Initializes and returns the combined WSGI application (Homepage + Telegram Bot).
+    This function is called once when the module loads.
     """
     if not TELEGRAM_BOT_API_KEY or not WEBHOOK_URL:
-        # If configuration is missing, return a dummy function
+        # If configuration is missing, return a dummy function for Gunicorn
+        logger.error("Configuration missing. Returning 500 handler.")
         return lambda environ, start_response: (
             start_response('500 Internal Server Error', [('Content-Type', 'text/plain')]), 
-            [b'Configuration Error: Check API Keys and WEBHOOK_URL']
+            [b'Configuration Error: Check API Keys and WEBHOOK_URL environment variables.']
         )
     
-    logger.info(f"Starting Webhook on port {PORT}...")
+    logger.info(f"Starting Webhook initialization on port {PORT}...")
     
     # 1. Create the Application and register the post_init hook
     application = Application.builder().token(TELEGRAM_BOT_API_KEY).post_init(post_init).build()
@@ -92,6 +98,7 @@ def run_bot():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, shorten_message))
 
     # 3. Configure Webhook settings
+    # This prepares the Application to receive webhooks from Telegram
     application.run_webhook(
         listen="0.0.0.0",        
         port=PORT,
@@ -119,7 +126,7 @@ def run_bot():
                     <meta name="viewport" content="width=device-width, initial-scale=1.0">
                     <title>Trimd URL Shortener Bot</title>
                     <style>
-                        body {{ font-family: 'Inter', sans-serif; text-align: center; padding: 50px; background-color: #f0f4f8; color: #333; }}
+                        body {{ font-family: sans-serif; text-align: center; padding: 50px; background-color: #f0f4f8; color: #333; }}
                         .container {{ max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1); }}
                         h1 {{ color: #007bff; margin-bottom: 20px; }}
                         .explanation {{ font-size: 1.1em; line-height: 1.6; margin-bottom: 30px; text-align: left; padding: 0 20px; }}
@@ -158,8 +165,13 @@ def run_bot():
         # All other requests (e.g., POST from Telegram) are routed to the bot application
         return telegram_wsgi_app(environ, start_response)
 
-    # run_bot returns the combined WSGI application to Gunicorn
+    # Return the combined WSGI application callable
     return combined_app
+
+# --- GUNICORN ENTRY POINT ---
+# Gunicorn looks for a WSGI callable named 'app'
+app = _initialize_bot_wsgi()
+
 
 if __name__ == '__main__':
     # This block is for local polling-based testing only
