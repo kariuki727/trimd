@@ -53,7 +53,6 @@ async def shorten_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handles incoming messages, finds URLs, shortens them, and replies with the new text.
     """
-    # ... (handlers logic is unchanged, remains correct)
     if update.message.text:
         original_text = update.message.text
     elif update.message.caption:
@@ -73,7 +72,7 @@ async def shorten_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- WEBHOOK ENTRY POINT FOR GUNICORN ---
 def run_bot():
     """
-    Initializes and runs the bot in Webhook mode.
+    Initializes and runs the bot in Webhook mode, wrapping it with a homepage handler.
     This function is called by Gunicorn to start the web service.
     """
     if not TELEGRAM_BOT_API_KEY or not WEBHOOK_URL:
@@ -97,11 +96,70 @@ def run_bot():
         listen="0.0.0.0",        
         port=PORT,
         url_path="",             
-        webhook_url=WEBHOOK_URL  # Required for initialization, though set in post_init
+        webhook_url=WEBHOOK_URL
     )
     
-    # run_webhook returns the WSGI application object needed by Gunicorn
-    return application.updater.app
+    # Get the Telegram bot's core WSGI application
+    telegram_wsgi_app = application.updater.app
+
+    # Define the final WSGI app to be returned to Gunicorn
+    def combined_app(environ, start_response):
+        """Routes requests between the homepage (GET /) and the Telegram bot (POST /)."""
+        path = environ.get('PATH_INFO', '')
+        method = environ.get('REQUEST_METHOD', '')
+
+        # Check for the homepage request (GET request to the root URL)
+        if path == '/' and method == 'GET':
+            # Serve the simple homepage HTML
+            html_content = f"""
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>Trimd URL Shortener Bot</title>
+                    <style>
+                        body {{ font-family: 'Inter', sans-serif; text-align: center; padding: 50px; background-color: #f0f4f8; color: #333; }}
+                        .container {{ max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1); }}
+                        h1 {{ color: #007bff; margin-bottom: 20px; }}
+                        .explanation {{ font-size: 1.1em; line-height: 1.6; margin-bottom: 30px; text-align: left; padding: 0 20px; }}
+                        .btn {{ 
+                            background-color: #007bff; color: white; padding: 12px 25px; 
+                            text-decoration: none; border-radius: 8px; font-weight: bold; 
+                            transition: background-color 0.3s; display: inline-block; 
+                            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+                        }}
+                        .btn:hover {{ background-color: #0056b3; }}
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <h1>Trimd URL Shortener Telegram Bot</h1>
+                        <div class="explanation">
+                            <p>This server is running the webhook backend for the URL shortening bot. It uses the Trimd API to turn long, messy links into short, shareable ones.</p>
+                            
+                            <h2>How to Use It:</h2>
+                            <ol style="padding-left: 20px;">
+                                <li>Click the button below to open the chat.</li>
+                                <li>Send the bot any message containing one or more links.</li>
+                                <li>The bot will reply instantly with the same message, but all detected URLs will be shortened!</li>
+                            </ol>
+                        </div>
+                        <a href="https://t.me/trimdbot" class="btn" target="_blank">
+                            Start Chatting with the Bot
+                        </a>
+                    </div>
+                </body>
+                </html>
+            """
+            start_response('200 OK', [('Content-Type', 'text/html')])
+            return [html_content.encode('utf-8')]
+        
+        # All other requests (e.g., POST from Telegram) are routed to the bot application
+        return telegram_wsgi_app(environ, start_response)
+
+    # run_bot returns the combined WSGI application to Gunicorn
+    return combined_app
 
 if __name__ == '__main__':
     # This block is for local polling-based testing only
