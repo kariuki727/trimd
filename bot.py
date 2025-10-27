@@ -1,23 +1,35 @@
 import os
+import logging
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder, 
+    Application, # Changed from ApplicationBuilder
     ContextTypes, 
     MessageHandler, 
     filters,
-    CommandHandler  # Import CommandHandler here
+    CommandHandler
 )
 from url_shortener import find_and_shorten_urls
+
+# Set up logging for better visibility during deployment
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 load_dotenv()
 TELEGRAM_BOT_API_KEY = os.getenv("TELEGRAM_BOT_API_KEY")
 URL_SHORTENER_API_KEY = os.getenv("URL_SHORTENER_API_KEY")
 
-if not TELEGRAM_BOT_API_KEY or not URL_SHORTENER_API_KEY:
-    print("Error: Missing API keys in environment variables.")
-    exit(1)
+# Environment variables required for Webhook deployment
+# Render automatically provides PORT. WEBHOOK_URL must be set in Render's environment settings.
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
+PORT = int(os.environ.get("PORT", "8080")) # Get the port provided by the host
+
+if not TELEGRAM_BOT_API_KEY or not URL_SHORTENER_API_KEY or not WEBHOOK_URL:
+    logger.error("Configuration Error: One or more required environment variables (API keys, WEBHOOK_URL) are missing.")
+    # We do not exit(1) here because Gunicorn must successfully import the module.
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the /start command."""
@@ -29,50 +41,66 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def shorten_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handles incoming messages, finds URLs, shortens them, and replies with the new text.
-    It works for both direct messages and forwarded messages (which have `forward_from` set).
     """
-    # Get the text from the message
     if update.message.text:
         original_text = update.message.text
     elif update.message.caption:
         original_text = update.message.caption
     else:
-        # Ignore messages without text (like stickers, photos without captions, etc.)
+        # Ignore messages without text
         return
 
-    # Check if the message is a forward or a new message that looks like it has URLs.
-    # We process all text messages to find and shorten links.
-    
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
     # Find and shorten all URLs in the message text
     new_text = find_and_shorten_urls(original_text, URL_SHORTENER_API_KEY)
 
     if new_text == original_text:
-        # No URLs were found or all shortening attempts failed
         await update.message.reply_text("I didn't find any new links to shorten in that message, or the API failed.")
     else:
-        # Reply with the new shortened text
         await update.message.reply_text(new_text)
 
-def main():
-    """Starts the bot."""
-    print("Starting bot...")
+# --- WEBHOOK ENTRY POINT FOR GUNICORN ---
+def run_bot():
+    """
+    Initializes and runs the bot in Webhook mode.
+    This function is called by Gunicorn to start the web service.
+    """
+    if not TELEGRAM_BOT_API_KEY or not WEBHOOK_URL:
+        # If configuration is missing, return a dummy function to prevent Gunicorn crash
+        return lambda environ, start_response: (
+            start_response('500 Internal Server Error', [('Content-Type', 'text/plain')]), 
+            [b'Configuration Error: Check API Keys and WEBHOOK_URL']
+        )
     
-    # Create the Application and pass it your bot's token.
-    application = ApplicationBuilder().token(TELEGRAM_BOT_API_KEY).build()
+    logger.info(f"Starting Webhook on port {PORT}...")
+    
+    # Create the Application
+    # Using Application.builder() instead of ApplicationBuilder() for modern usage
+    application = Application.builder().token(TELEGRAM_BOT_API_KEY).build()
 
-    # on different commands - answer in Telegram
-    application.add_handler(CommandHandler("start", start)) # Fixed: Using CommandHandler directly
-
-    # on non-command message - shorten the URL(s)
-    # filters.TEXT & ~filters.COMMAND ensures it only processes text messages that aren't commands
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, shorten_message))
 
-    # Run the bot until the user presses Ctrl-C
-    print("Bot is running. Press Ctrl-C to stop.")
-    application.run_polling(poll_interval=1.0) # Poll for new updates every 1.0 second
+    # Configure Webhook settings
+    application.run_webhook(
+        listen="0.0.0.0",        # Crucial for Render/cloud deployment
+        port=PORT,
+        url_path="",             # Empty path means Telegram hits the root URL
+        webhook_url=WEBHOOK_URL  # The public URL Telegram will send updates to
+    )
+    
+    # run_webhook returns the WSGI application object needed by Gunicorn
+    return application.updater.app
 
 if __name__ == '__main__':
-    # Removed the redundant and potentially incorrect import here
-    main()
+    # This block is for local polling-based testing only
+    if TELEGRAM_BOT_API_KEY:
+        logger.info("Running locally with polling for testing...")
+        application = Application.builder().token(TELEGRAM_BOT_API_KEY).build()
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, shorten_message))
+        application.run_polling(poll_interval=1.0)
+    else:
+        logger.error("Cannot run locally: TELEGRAM_BOT_API_KEY is missing.")
