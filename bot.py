@@ -1,7 +1,13 @@
 import os
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    ApplicationBuilder, 
+    ContextTypes, 
+    MessageHandler, 
+    filters,
+    CommandHandler  # Import CommandHandler here
+)
 from url_shortener import find_and_shorten_urls
 
 # Load environment variables from .env file
@@ -57,7 +63,7 @@ def main():
     application = ApplicationBuilder().token(TELEGRAM_BOT_API_KEY).build()
 
     # on different commands - answer in Telegram
-    application.add_handler(telegram.ext.CommandHandler("start", start))
+    application.add_handler(CommandHandler("start", start)) # Fixed: Using CommandHandler directly
 
     # on non-command message - shorten the URL(s)
     # filters.TEXT & ~filters.COMMAND ensures it only processes text messages that aren't commands
@@ -68,6 +74,5 @@ def main():
     application.run_polling(poll_interval=1.0) # Poll for new updates every 1.0 second
 
 if __name__ == '__main__':
-    # Add the necessary import for the telegram.ext module
-    import telegram.ext
+    # Removed the redundant and potentially incorrect import here
     main()
